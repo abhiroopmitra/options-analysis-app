@@ -1,4 +1,4 @@
-# app.py - FIXED - works for ANY ticker
+# app.py - FIXED for closed market + any ticker
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -8,7 +8,7 @@ from datetime import datetime
 from scipy.stats import norm
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Options App - Any Ticker", layout="wide")
+st.set_page_config(page_title="Options App", layout="wide")
 
 try:
     from curl_cffi import requests as cRequests
@@ -31,8 +31,7 @@ def bs_greeks(S,K,T,r,q,sigma, otype='call'):
             delta=exp_qt*(Nd1-1); prob=norm.cdf(-d2)
             theta_y=-(S*exp_qt*nd1*sigma)/(2*sqrtT)+r*K*exp_rt*norm.cdf(-d2)-q*S*exp_qt*norm.cdf(-d1)
         return {'delta':delta,'theta':theta_y/365,'prob_itm':prob}
-    except:
-        return {'delta':0,'theta':0,'prob_itm':0}
+    except: return {'delta':0,'theta':0,'prob_itm':0}
 
 def calc_prob_be(S,BE,T,r,q,sigma, otype='call'):
     if T<=0 or sigma<=0 or BE<=0: return 0
@@ -41,8 +40,7 @@ def calc_prob_be(S,BE,T,r,q,sigma, otype='call'):
         d1=(math.log(S/BE)+(r-q+0.5*sigma**2)*T)/(sigma*sqrtT)
         d2=d1-sigma*sqrtT
         return norm.cdf(d2) if otype=='call' else norm.cdf(-d2)
-    except:
-        return 0
+    except: return 0
 
 def rsi(s,p=14):
     d=s.diff(); g=d.where(d>0,0); l=-d.where(d<0,0)
@@ -65,17 +63,11 @@ def analyze_stock(ticker):
     e12=c.ewm(span=12).mean(); e26=c.ewm(span=26).mean(); daily['MACD']=e12-e26; daily['MACD_Sig']=daily['MACD'].ewm(span=9).mean()
     price=float(c.iloc[-1]); rsi_v=float(daily['RSI'].iloc[-1]); atr_v=float(daily['ATR'].iloc[-1])
     roof=float(daily['High'].rolling(20).max().iloc[-1]); floor=float(daily['Low'].rolling(20).min().iloc[-1])
-    sup = daily.nsmallest(30,'Low'); res = daily.nlargest(30,'High')
-    supports = sorted([float(x) for x in sup['Low'].unique() if x < price])[-2:]
-    resistances = sorted([float(x) for x in res['High'].unique() if x > price])[:2]
-    bull = (1 if price>daily['SMA50'].iloc[-1] else 0)+(2 if price>daily['SMA200'].iloc[-1] else 0)
-    verdict = "BULLISH PULLBACK" if price>daily['SMA200'].iloc[-1] and rsi_v<55 else "BULLISH" if bull>=3 else "BEARISH" if bull<=1 else "NEUTRAL"
-    return {'daily':daily,'price':price,'rsi':rsi_v,'atr':atr_v,'roof':roof,'floor':floor,'supports':supports,'resistances':resistances,'verdict':verdict,'target_up':resistances[0] if resistances else roof}
+    return {'daily':daily,'price':price,'rsi':rsi_v,'atr':atr_v,'roof':roof,'floor':floor,'verdict':"BULLISH" if price>daily['SMA50'].iloc[-1] else "BEARISH"}
 
 @st.cache_data(ttl=300)
 def get_rates(ticker):
-    try: 
-        r=float(yf.Ticker("^IRX", session=SESSION).history(period="5d")['Close'].iloc[-1]/100) if SESSION else float(yf.Ticker("^IRX").history(period="5d")['Close'].iloc[-1]/100)
+    try: r=float(yf.Ticker("^IRX", session=SESSION).history(period="5d")['Close'].iloc[-1]/100) if SESSION else float(yf.Ticker("^IRX").history(period="5d")['Close'].iloc[-1]/100)
     except: r=0.045
     try: 
         info = (yf.Ticker(ticker, session=SESSION).info if SESSION else yf.Ticker(ticker).info)
@@ -87,14 +79,13 @@ def get_rates(ticker):
 def get_expiries(ticker):
     try:
         tkr = yf.Ticker(ticker, session=SESSION) if SESSION else yf.Ticker(ticker)
-        return tkr.options, None
-    except Exception as e:
-        return [], str(e)
+        return tkr.options
+    except: return []
 
 def get_chain(ticker, dte_min, dte_max):
     tkr = yf.Ticker(ticker, session=SESSION) if SESSION else yf.Ticker(ticker)
-    exps, err = get_expiries(ticker)
-    if not exps: return pd.DataFrame(), [], err
+    exps = get_expiries(ticker)
+    if not exps: return pd.DataFrame(), []
     today=datetime.now().date()
     dated=[]
     for e in exps:
@@ -110,71 +101,66 @@ def get_chain(ticker, dte_min, dte_max):
             c=ch.calls.copy(); c['expiration']=exp_str; c['dte']=dte; calls.append(c)
         except: continue
     df = pd.concat(calls) if calls else pd.DataFrame()
-    return df, dated, None
+    return df, dated
 
 st.sidebar.title("Inputs")
-ticker = st.sidebar.text_input("Enter ANY Ticker", "SPY").upper()
-max_risk = st.sidebar.number_input("Max Risk $ per trade", 50, 10000, 1000, 50)
-dte_min = st.sidebar.slider("Min DTE", 0, 30, 0)
-dte_max = st.sidebar.slider("Max DTE", 7, 365, 180)
+ticker = st.sidebar.text_input("Enter ANY Ticker", "AAPL").upper()
+max_risk = st.sidebar.number_input("Max Risk $ per trade", 50, 10000, 500, 50)
+dte_min = st.sidebar.slider("Min DTE", 0, 30, 7)
+dte_max = st.sidebar.slider("Max DTE", 7, 365, 45)
 
 if st.sidebar.button("Analyze", type="primary"):
     sa=analyze_stock(ticker)
     if not sa: st.error(f"No daily data for {ticker}"); st.stop()
     r_rate,q = get_rates(ticker)
     c1,c2,c3=st.columns(3); c1.metric(f"{ticker} Price", f"{sa['price']:.2f}"); c2.metric("Verdict", sa['verdict']); c3.metric("RSI / ATR", f"{sa['rsi']:.0f} / {sa['atr']:.2f}")
-    st.write(f"Roof 20d: {sa['roof']:.2f} | Floor 20d: {sa['floor']:.2f} | Supports: {sa['supports']} | Resist: {sa['resistances']} | Target: {sa['target_up']:.2f}")
     fig=go.Figure(); fig.add_trace(go.Candlestick(x=sa['daily'].index, open=sa['daily']['Open'], high=sa['daily']['High'], low=sa['daily']['Low'], close=sa['daily']['Close'], name=ticker))
     fig.add_trace(go.Scatter(x=sa['daily'].index, y=sa['daily']['SMA50'], name="SMA50")); fig.add_trace(go.Scatter(x=sa['daily'].index, y=sa['daily']['SMA200'], name="SMA200"))
     fig.update_layout(height=400, xaxis_rangeslider_visible=False); st.plotly_chart(fig, use_container_width=True)
 
     with st.spinner(f"Pulling {ticker} options..."):
-        calls_df, dated, err = get_chain(ticker, dte_min, dte_max)
-        exps,_ = get_expiries(ticker)
-
-    with st.expander("Debug - expiries"):
-        st.write(f"Found {len(exps)} expiries", exps[:10])
-        st.write("DTE list", dated[:10])
-        if SESSION: st.success("Anti-block enabled")
-        if err: st.error(err)
+        calls_df, dated = get_chain(ticker, dte_min, dte_max)
 
     if calls_df.empty:
-        st.error("No options. Set DTE to 0-365 and try again in 30 sec - Yahoo rate limits.")
-        st.stop()
+        st.error("Yahoo blocked or no chain. Wait 30 sec and try DTE 0-365"); st.stop()
 
-    hist_vol=sa['daily']['Close'].pct_change().std()*np.sqrt(252); hist_vol=0.2 if np.isnan(hist_vol) else hist_vol
-    calls_df['ask_fill']=calls_df['ask'].fillna(calls_df['lastPrice'])
-    calls_df['bid_fill']=calls_df['bid'].fillna(calls_df['lastPrice']*0.9)
-    calls_df['mid']=(calls_df['bid_fill']+calls_df['ask_fill'])/2
-    calls_df['iv']=calls_df['impliedVolatility'].fillna(hist_vol).replace(0,hist_vol)
+    # FIX: Use lastPrice when bid/ask is 0 (market closed)
+    calls_df['ask'] = calls_df['ask'].fillna(0)
+    calls_df['bid'] = calls_df['bid'].fillna(0)
+    calls_df['lastPrice'] = calls_df['lastPrice'].fillna(0)
+    calls_df['real_price'] = calls_df.apply(lambda r: r['ask'] if r['ask']>0 else (r['lastPrice'] if r['lastPrice']>0 else 0), axis=1)
+    calls_df['real_bid'] = calls_df.apply(lambda r: r['bid'] if r['bid']>0 else r['real_price']*0.9, axis=1)
+    calls_df['iv'] = calls_df['impliedVolatility'].fillna(0.4).replace(0,0.4)
+    calls_df['mid'] = (calls_df['real_price']+calls_df['real_bid'])/2
 
-    delta_list=[]; theta_list=[]; prob_list=[]; be_list=[]; prob_be_list=[]
+    # Calculate Greeks
+    dlist=[]; tlist=[]; belist=[]; pbelist=[]
     for _,row in calls_df.iterrows():
-        T=row['dte']/365 if row['dte']>0 else 0.001
-        sig=row['iv']
-        g=bs_greeks(sa['price'], row['strike'], T, r_rate, q, sig, 'call')
-        delta_list.append(g['delta']); theta_list.append(g['theta']); prob_list.append(g['prob_itm'])
-        be_val=row['strike']+(row['ask_fill'] if pd.notna(row['ask_fill']) else row['lastPrice'])
-        be_list.append(be_val)
-        prob_be_list.append(calc_prob_be(sa['price'], be_val, T, r_rate, q, sig, 'call'))
+        T=row['dte']/365 if row['dte']>0 else 0.0027
+        g=bs_greeks(sa['price'], row['strike'], T, r_rate, q, row['iv'], 'call')
+        dlist.append(g['delta']); tlist.append(g['theta'])
+        be=row['strike']+row['real_price']
+        belist.append(be)
+        pbelist.append(calc_prob_be(sa['price'], be, T, r_rate, q, row['iv'], 'call'))
+    calls_df['delta']=dlist; calls_df['theta']=tlist; calls_df['breakeven']=belist; calls_df['prob_profit']=pbelist
+    calls_df['max_loss']=calls_df['real_price']*100
+    calls_df['dist_from_price'] = (calls_df['strike'] - sa['price']).abs()
 
-    calls_df['delta']=delta_list; calls_df['theta']=theta_list; calls_df['prob_itm']=prob_list
-    calls_df['breakeven']=be_list; calls_df['prob_profit']=prob_be_list
-    calls_df['max_loss']=calls_df['ask_fill']*100; calls_df['spread_pct']=(calls_df['ask_fill']-calls_df['bid_fill'])/calls_df['mid'].replace(0,1)
-
-    good=calls_df[(calls_df['max_loss']<=max_risk) & (calls_df['volume']>=10) & (calls_df['spread_pct']<0.5) & (calls_df['delta']>0.15) & (calls_df['delta']<0.85)].copy()
-    good['score']=good['prob_profit']*50 + (1-good['spread_pct'].clip(0,1))*20 + good['delta']*30
-    good=good.sort_values('score', ascending=False)
+    # Filter: Only options within 20% of current price and within max risk
+    near = calls_df[calls_df['dist_from_price'] <= sa['price']*0.2].copy()
+    good = near[(near['max_loss']<=max_risk) & (near['max_loss']>0) & (near['delta']>0.15) & (near['delta']<0.85)].copy()
+    good = good.sort_values(['dte','dist_from_price'])
 
     st.subheader(f"Top Calls for {ticker} within ${max_risk}")
     if good.empty:
-        st.warning(f"No calls under ${max_risk}. Try $1000. SPY 760 call was $1090, 775 call $279.")
-        st.dataframe(calls_df[['expiration','dte','strike','bid_fill','ask_fill','lastPrice','volume','delta','breakeven']].head(15))
+        st.warning(f"No calls under ${max_risk} near price. {ticker} is ${sa['price']:.2f}. Example: A 250 call costs $8905 > $300. Try Max Risk $500 or $1000. Showing cheapest near price:")
+        cheapest = near[near['max_loss']>0].sort_values('max_loss').head(10)
+        st.dataframe(cheapest[['expiration','dte','strike','real_bid','real_price','lastPrice','volume','delta','breakeven','max_loss']])
     else:
         for _,r in good.head(5).iterrows():
             with st.container(border=True):
-                st.write(f"**{ticker} {r['expiration']} Call {r['strike']} - Ask ${r['ask_fill']:.2f} = ${r['max_loss']:.0f} max loss | Score {r['score']:.0f}**")
+                st.write(f"**{ticker} {r['expiration']} Call {r['strike']} - ${r['real_price']:.2f} = ${r['max_loss']:.0f} max loss**")
                 st.write(f"BE ${r['breakeven']:.2f} ({(r['breakeven']/sa['price']-1)*100:+.2f}%) | Delta {r['delta']:.2f} | Theta ${r['theta']*100:.1f}/day | Prob Profit {r['prob_profit']*100:.0f}% | Vol {r['volume']}")
                 st.info(f"Simple: Pay ${r['max_loss']:.0f} to buy 100 shares at ${r['strike']}. Need {ticker} > ${r['breakeven']:.2f} to profit. ~{r['prob_profit']*100:.0f}% chance. Lose ${abs(r['theta']*100):.0f}/day if stalls.")
 else:
-    st.info("Left side: Type ANY ticker - SPY, AAPL, NVDA, TSLA. Set Max Risk $1000, DTE 0-180, click Analyze.")
+    st.info("Set ticker like AAPL, NVDA, SPY. Set Max Risk 500, Min DTE 7, Max DTE 45, click Analyze.")
